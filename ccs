@@ -108,10 +108,13 @@ seen=" "
 
 # 1) Live sessions: the registry, verified by checking the pid is still alive.
 for f in "$SESS_DIR"/*.json; do
-  IFS=$'\t' read -r sid cwd st upd name pid < <(
+  # Note: every field below is guaranteed non-empty. `read` with a whitespace
+  # IFS (tab) collapses empty fields, so an optional value like .name must NOT
+  # be read here — the title is resolved separately via _title_for.
+  IFS=$'\t' read -r sid cwd st upd pid < <(
     jq -r '[.sessionId, .cwd, (.status // "idle"),
             ((.updatedAt // .startedAt) / 1000 | floor),
-            (.name // ""), (.pid // 0)] | @tsv' "$f" 2>/dev/null
+            (.pid // 0)] | @tsv' "$f" 2>/dev/null
   ) || true
   [ -z "${sid:-}" ] && continue
   kill -0 "${pid:-0}" 2>/dev/null || continue          # stale registry entry -> treat as exited
@@ -119,7 +122,7 @@ for f in "$SESS_DIR"/*.json; do
   seen="$seen$sid "
   [ "$st" = busy ] && sr=0 || sr=1
   printf '0\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$sr" "$upd" "$st" "$cwd" "$(_title_for "$sid" "$name")" "$sid" >>"$rows"
+    "$sr" "$upd" "$st" "$cwd" "$(_title_for "$sid" "")" "$sid" >>"$rows"
 done
 
 # 2) Exited sessions (-a only): on-disk transcripts not already listed, newest 25.
