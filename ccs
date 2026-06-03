@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+#
+# ccs — Claude Code Sessions dashboard
+#
+# Lists your Claude Code sessions across every project directory in one place,
+# with status, age, directory and title, and lets you resume one by number.
+#
+# Read-only. Depends only on `jq`. Works in bash and zsh, on Linux and macOS.
+#
+# Homepage: https://github.com/<you>/ccs
+# License: MIT
+
+VERSION="0.1.0"
+
+# Honor Claude Code's config relocation, fall back to the default.
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SESS_DIR="$CFG/sessions"
+PROJ_DIR="$CFG/projects"
+
+usage() {
+  cat <<'EOF'
+ccs — Claude Code Sessions dashboard
+
+USAGE:
+  ccs                       List live sessions; pick a number to resume.
+  ccs -a                    Also include exited sessions.
+  ccs [-a] -- <claude-args> Forward args to `claude --resume` on the picked
+                            session, e.g. --dangerously-skip-permissions.
+  ccs -h                    Show this help.
+  ccs -V                    Show version.
+
+EXAMPLES:
+  ccs -- --dangerously-skip-permissions
+  ccs -a -- --model opus
+
+Status:  🟢 busy   ⚪ live (idle)   ⚫ exited
+
+Titles come from your manual /rename first, then Claude's auto-generated
+title, otherwise "(untitled)".
+EOF
+}
+
+ALL=0
+PASS=()                       # extra args forwarded to `claude --resume`
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a|--all)     ALL=1 ;;
+    -h|--help)    usage; exit 0 ;;
+    -V|--version) echo "ccs $VERSION"; exit 0 ;;
+    --)           shift; PASS=("$@"); break ;;
+    *) echo "ccs: unknown option '$1' (try 'ccs -h', or use '-- $1' to pass it to claude)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+command -v jq >/dev/null 2>&1 || {
+  echo "ccs: requires 'jq'. Install it: https://jqlang.github.io/jq/download/" >&2
+  exit 1
+}
+
+if [ ! -d "$SESS_DIR" ] && [ ! -d "$PROJ_DIR" ]; then
+  echo "ccs: no Claude Code data found under $CFG" >&2
+  echo "     (set CLAUDE_CONFIG_DIR if your config lives elsewhere)" >&2
+  exit 1
+fi
+
+# Portable mtime (GNU vs BSD/macOS stat).
+if stat -c %Y "$CFG" >/dev/null 2>&1; then
+  _mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
+else
+  _mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+fi
+
+now=$(date +%s)
+rows=$(mktemp); pick=$(mktemp); names=$(mktemp)
+trap 'rm -f "$rows" "$pick" "$names"' EXIT
+
+# bash: don't iterate the literal pattern when a glob matches nothing.
+if [ -n "${BASH_VERSION:-}" ]; then shopt -s nullglob; else setopt NULL_GLOB 2>/dev/null; fi
+
+# Build a sid -> manual-name map from the session registry. The manual name
+# (set by /rename or -n) lives ONLY here; `claude agents --json` strips it.
+for f in "$SESS_DIR"/*.json; do
+  jq -r 'select(.name != null and .name != "") | [.sessionId, .name] | @tsv' "$f" 2>/dev/null
+done >"$names"
+
+_manual_name() { awk -F'\t' -v s="$1" '$1==s{print $2; exit}' "$names"; }
+
+_ai_title() {  # $1 = sessionId -> Claude's auto title, or empty
+  local g t=""
+  for g in "$PROJ_DIR"/*/"$1".jsonl; do
+    [ -f "$g" ] || continue
+    t=$(grep '"type":"ai-title"' "$g" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
+    break
+  done
+  printf '%s' "$t"
+}
+
+_title_for() {  # $1 = sessionId  $2 = raw name (may be empty) -> truncated title
+  local t="${2:-}"
+  [ -z "$t" ] && t=$(_manual_name "$1")
+  [ -z "$t" ] && t=$(_ai_title "$1")
+  [ -z "$t" ] && t="(untitled)"
+  jq -rn --arg s "$t" '$s[0:46]'   # codepoint-safe truncation (handles CJK)
+}
+
+seen=" "
+
+# 1) Live sessions: the registry, verified by checking the pid is still alive.
+for f in "$SESS_DIR"/*.json; do
+  IFS=$'\t' read -r sid cwd st upd name pid < <(
+    jq -r '[.sessionId, .cwd, (.status // "idle"),
+            ((.updatedAt // .startedAt) / 1000 | floor),
+            (.name // ""), (.pid // 0)] | @tsv' "$f" 2>/dev/null
+  ) || true
+  [ -z "${sid:-}" ] && continue
+  kill -0 "${pid:-0}" 2>/dev/null || continue          # stale registry entry -> treat as exited
+  case "$seen" in *" $sid "*) continue ;; esac
+  seen="$seen$sid "
+  [ "$st" = busy ] && sr=0 || sr=1
+  printf '0\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sr" "$upd" "$st" "$cwd" "$(_title_for "$sid" "$name")" "$sid" >>"$rows"
+done
+
+# 2) Exited sessions (-a only): on-disk transcripts not already listed, newest 25.
+if [ "$ALL" = 1 ]; then
+  cand=$(mktemp)
+  for jf in "$PROJ_DIR"/*/*.jsonl; do
+    case "$jf" in */subagents/*) continue ;; esac
+    printf '%s\t%s\n' "$(_mtime "$jf")" "$jf"
+  done | sort -t$'\t' -k1,1nr >"$cand"
+  dn=0
+  while IFS=$'\t' read -r mt jf; do
+    sid=$(basename "$jf" .jsonl)
+    case "$seen" in *" $sid "*) continue ;; esac
+    seen="$seen$sid "
+    dn=$((dn + 1)); [ "$dn" -gt 25 ] && continue
+    cwd=$(jq -r 'select(.cwd != null) | .cwd' "$jf" 2>/dev/null | head -1)
+    printf '1\t2\t%s\t%s\t%s\t%s\t%s\n' \
+      "$mt" "dead" "${cwd:-?}" "$(_title_for "$sid" "")" "$sid" >>"$rows"
+  done <"$cand"
+  rm -f "$cand"
+fi
+
+if [ ! -s "$rows" ]; then
+  echo "No Claude sessions found."
+  exit 0
+fi
+
+# Sort: live before exited, busy before idle, most-recent first. Drop sort keys.
+sort -t$'\t' -k1,1n -k2,2n -k3,3nr "$rows" | cut -f3- >"$pick"
+
+i=0
+while IFS=$'\t' read -r upd st cwd title sid; do
+  i=$((i + 1))
+  age=$(( (now - upd) / 60 ))
+  if   [ "$age" -lt 60 ];   then ago="${age}m"
+  elif [ "$age" -lt 1440 ]; then ago="$((age / 60))h"
+  else                           ago="$((age / 1440))d"; fi
+  case "$st" in busy) icon="🟢" ;; dead) icon="⚫" ;; *) icon="⚪" ;; esac
+  printf '%2d  %s  %4s  %-20.20s  %s\n' "$i" "$icon" "$ago" "$(basename "$cwd")" "$title"
+done <"$pick"
+
+[ "$ALL" = 1 ] || echo "(live only — 'ccs -a' includes exited sessions)"
+
+# Resume picker — only when attached to a terminal.
+[ -t 0 ] || exit 0
+printf 'Resume #? (enter to skip) '
+read -r choice || exit 0
+[ -n "${choice:-}" ] || exit 0
+line=$(sed -n "${choice}p" "$pick")
+[ -n "$line" ] || { echo "ccs: no row $choice" >&2; exit 1; }
+rcwd=$(printf '%s' "$line" | cut -f3)
+rsid=$(printf '%s' "$line" | cut -f5)
+cd "$rcwd" 2>/dev/null || { echo "ccs: cannot cd to $rcwd" >&2; exit 1; }
+if [ "${#PASS[@]}" -gt 0 ]; then
+  exec claude --resume "$rsid" "${PASS[@]}"
+else
+  exec claude --resume "$rsid"
+fi
