@@ -10,7 +10,7 @@
 # Homepage: https://github.com/nilevols/ccs
 # License: MIT
 
-VERSION="0.0.1"
+VERSION="0.1.0"
 
 # Honor Claude Code's config relocation, fall back to the default.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
