@@ -7,7 +7,7 @@
 #
 # Read-only. Depends only on `jq`. Works in bash and zsh, on Linux and macOS.
 #
-# Homepage: https://github.com/<you>/ccs
+# Homepage: https://github.com/nilevols/ccs
 # License: MIT
 
 VERSION="0.1.0"

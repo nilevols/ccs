@@ -53,7 +53,7 @@ Requires [`jq`](https://jqlang.github.io/jq/download/). Works in **bash** and
 **zsh**, on **Linux** and **macOS**.
 
 ```bash
-git clone https://github.com/<you>/ccs.git
+git clone https://github.com/nilevols/ccs.git
 cd ccs
 ./install.sh            # installs to ~/.local/bin
 ```
@@ -158,7 +158,7 @@ $ ccs -a
 **Linux** 和 **macOS**。
 
 ```bash
-git clone https://github.com/<you>/ccs.git
+git clone https://github.com/nilevols/ccs.git
 cd ccs
 ./install.sh            # 安装到 ~/.local/bin
 ```
